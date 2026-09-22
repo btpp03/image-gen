@@ -1,0 +1,154 @@
+name: qwen-image
+
+# 免费生图：HuggingFace ZeroGPU Space + 机场节点轮换（换 IP = 换一份免费额度）
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: "图片描述（英文更稳，中文也吃）"
+        required: true
+        type: string
+      route:
+        description: "pool=轮换代理IP刷免费额度 / direct=直连"
+        default: pool
+        type: choice
+        options: [pool, direct]
+      ratio:
+        description: "Auto|1:1|4:3|3:4|3:2|2:3|16:9|9:16"
+        default: Auto
+        type: string
+      resolution:
+        description: "1024|1536|2048"
+        default: "1024"
+        type: string
+      steps:
+        description: "8-60（20 够；8 最快）"
+        default: "20"
+        type: string
+      seed:
+        description: "留空=随机"
+        default: ""
+        type: string
+      image_urls:
+        description: "可选：参考图直链，逗号分隔（最多10张，用于改图）"
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  SINGBOX_VER: "1.14.1"
+  SUB_UA_DEFAULT: "v2rayNG/1.9.16"
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 sing-box + 生成代理池
+        if: inputs.route == 'pool'
+        env:
+          SUB_URL: ${{ secrets.JKUN_SUB_URL }}
+          SUB_UA: ${{ secrets.JKUN_SUB_UA }}
+          NODES_B64: ${{ secrets.JKUN_NODES_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+
+          curl -fsSL -o "$RUNNER_TEMP/sbx.tar.gz" \
+            "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/sbx.tar.gz" -C "$RUNNER_TEMP"
+          install -m755 "$RUNNER_TEMP/sing-box-${SINGBOX_VER}-linux-amd64/sing-box" "$HOME/.local/bin/sing-box"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          sing-box version | head -2
+
+          if [ -n "${SUB_URL:-}" ]; then
+            echo "节点来源: 订阅 $SUB_URL"
+            python3 scripts/nodes_to_singbox.py --sub-url "$SUB_URL" \
+              --sub-ua "${SUB_UA:-$SUB_UA_DEFAULT}" \
+              --out-config sbx.json --out-pool raw_pool.txt
+          elif [ -n "${NODES_B64:-}" ]; then
+            echo "节点来源: JKUN_NODES_B64 快照"
+            printf '%s' "$NODES_B64" | base64 -d > nodes.txt
+            python3 scripts/nodes_to_singbox.py nodes.txt \
+              --out-config sbx.json --out-pool raw_pool.txt
+          else
+            echo "::error::没有节点密钥：设置 JKUN_SUB_URL（订阅，推荐）或 JKUN_NODES_B64（快照）"
+            exit 1
+          fi
+
+          sing-box check -c sbx.json
+          nohup sing-box run -c sbx.json > "$RUNNER_TEMP/singbox.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            ss -ltn 2>/dev/null | grep -q '127.0.0.1:10800' && break
+            sleep 1
+          done
+          echo "本地代理端口: $(ss -ltn | grep -c '127.0.0.1:108')"
+
+      - name: 探活（剔除死节点）
+        if: inputs.route == 'pool'
+        run: |
+          set -euo pipefail
+          : > pool.txt
+          while read -r p; do
+            ip=$(curl -s -x "$p" --max-time 20 https://api.ipify.org || true)
+            if [ -n "$ip" ]; then echo "  OK   $p -> $ip"; echo "$p" >> pool.txt
+            else echo "  DEAD $p"; fi
+          done < raw_pool.txt
+          n=$(wc -l < pool.txt)
+          echo "存活代理: $n"
+          [ "$n" -gt 0 ] || { echo "::error::所有代理端口都不通"; tail -50 "$RUNNER_TEMP/singbox.log"; exit 1; }
+          {
+            echo "### 代理池 $n 个存活出口"
+            while read -r p; do echo "- \`$p\` -> $(curl -s -x "$p" --max-time 15 https://api.ipify.org)"; done < pool.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 生成
+        env:
+          PROMPT: ${{ inputs.prompt }}
+          RATIO: ${{ inputs.ratio }}
+          RES: ${{ inputs.resolution }}
+          STEPS: ${{ inputs.steps }}
+          SEED: ${{ inputs.seed }}
+          IMAGE_URLS: ${{ inputs.image_urls }}
+          ROUTE: ${{ inputs.route }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          EXTRA=()
+          [ "$ROUTE" = "pool" ] && EXTRA+=(--proxy-pool pool.txt --proxy-policy round-robin --attempts 40)
+          [ -n "$SEED" ] && EXTRA+=(--seed "$SEED")
+
+          IMGS=()
+          if [ -n "$IMAGE_URLS" ]; then
+            mkdir -p in
+            i=0
+            IFS=',' read -ra URLS <<< "$IMAGE_URLS"
+            for u in "${URLS[@]}"; do
+              i=$((i+1))
+              curl -fsSL "$u" -o "in/img$i.png"
+              IMGS+=(--image "in/img$i.png")
+            done
+          fi
+
+          python3 scripts/qwen_image.py "$PROMPT" \
+            --ratio "$RATIO" --resolution "$RES" --steps "$STEPS" \
+            --out-dir out "${EXTRA[@]}" ${IMGS+"${IMGS[@]}"} 2>&1 | tee -a result.txt
+
+      - name: 上传结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen-image-${{ github.run_number }}
+          path: |
+            out/*.png
+            result.txt
+          if-no-files-found: warn
+
+      - name: 失败时贴 sing-box 日志
+        if: failure() && inputs.route == 'pool'
+        run: tail -60 "$RUNNER_TEMP/singbox.log" || true

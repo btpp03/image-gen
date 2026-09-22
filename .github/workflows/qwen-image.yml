@@ -152,3 +152,43 @@ jobs:
       - name: 失败时贴 sing-box 日志
         if: failure() && inputs.route == 'pool'
         run: tail -60 "$RUNNER_TEMP/singbox.log" || true
+
+      # ↓ 出图后自动推到 TG。bot/chat 由 secrets.TG_NOTIFY_TOKEN、TG_NOTIFY_CHAT 指定。
+      - name: 发到 TG 通知
+        if: always()
+        env:
+          TG_TOKEN: ${{ secrets.TG_NOTIFY_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_NOTIFY_CHAT }}
+          PROMPT: ${{ inputs.prompt }}
+          ROUTE: ${{ inputs.route }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_NO: ${{ github.run_number }}
+        run: |
+          set -uo pipefail
+          if [ -z "${TG_TOKEN:-}" ] || [ -z "${TG_CHAT:-}" ]; then
+            echo "::notice::未配置 TG_NOTIFY_TOKEN / TG_NOTIFY_CHAT，跳过 TG 通知"
+            exit 0
+          fi
+          API="https://api.telegram.org/bot$TG_TOKEN"
+          HEAD="run #${RUN_NO}  route=$ROUTE"
+          n=0
+          for f in out/*.png; do
+            [ -e "$f" ] || continue
+            n=$((n+1))
+            echo "发送 $f -> TG"
+            CAP=$(printf '✅ 出图 %s　%s\nprompt: %s' "$n" "$HEAD" "${PROMPT:0:200}")
+            curl -fsS --max-time 120 "$API/sendPhoto" \
+              -F chat_id="$TG_CHAT" -F photo=@"$f" -F caption="$CAP" > /dev/null \
+              && echo "  photo ok" || echo "  photo 失败"
+            CAP2=$(printf '原图 %s bytes　%s\n%s' "$(stat -c%s "$f")" "$HEAD" "$RUN_URL")
+            curl -fsS --max-time 300 "$API/sendDocument" \
+              -F chat_id="$TG_CHAT" -F document=@"$f" -F caption="$CAP2" > /dev/null \
+              && echo "  document ok" || echo "  document 失败"
+          done
+          if [ "$n" -eq 0 ]; then
+            BODY=$(tail -c 1200 result.txt 2>/dev/null || echo "(无 result.txt)")
+            MSG=$(printf '❌ 没出图　%s\n%s\n%s' "$HEAD" "$BODY" "$RUN_URL")
+            curl -fsS --max-time 60 "$API/sendMessage" \
+              -F chat_id="$TG_CHAT" -F text="$MSG" > /dev/null || true
+          fi
+          echo "TG 通知完成：$n 张图"

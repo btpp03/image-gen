@@ -177,18 +177,16 @@ jobs:
             n=$((n+1))
             echo "发送 $f -> TG"
             CAP=$(printf '✅ 出图 %s　%s\nprompt: %s' "$n" "$HEAD" "${PROMPT:0:200}")
-            curl -fsS --max-time 120 "$API/sendPhoto" \
-              -F chat_id="$TG_CHAT" -F photo=@"$f" -F caption="$CAP" > /dev/null \
-              && echo "  photo ok" || echo "  photo 失败"
+            echo "  sendPhoto -> $(curl -sS --max-time 120 "$API/sendPhoto" \
+              -F chat_id="$TG_CHAT" -F photo=@"$f" -F caption="$CAP" | head -c 200)"
             CAP2=$(printf '原图 %s bytes　%s\n%s' "$(stat -c%s "$f")" "$HEAD" "$RUN_URL")
-            curl -fsS --max-time 300 "$API/sendDocument" \
-              -F chat_id="$TG_CHAT" -F document=@"$f" -F caption="$CAP2" > /dev/null \
-              && echo "  document ok" || echo "  document 失败"
+            echo "  sendDocument -> $(curl -sS --max-time 300 "$API/sendDocument" \
+              -F chat_id="$TG_CHAT" -F document=@"$f" -F caption="$CAP2" | head -c 200)"
           done
           if [ "$n" -eq 0 ]; then
             BODY=$(tail -c 1200 result.txt 2>/dev/null || echo "(无 result.txt)")
             MSG=$(printf '❌ 没出图　%s\n%s\n%s' "$HEAD" "$BODY" "$RUN_URL")
-            curl -fsS --max-time 60 "$API/sendMessage" \
-              -F chat_id="$TG_CHAT" -F text="$MSG" > /dev/null || true
+            echo "  sendMessage -> $(curl -sS --max-time 60 "$API/sendMessage" \
+              -F chat_id="$TG_CHAT" -F text="$MSG" | head -c 200)"
           fi
           echo "TG 通知完成：$n 张图"

@@ -42,6 +42,7 @@ import json
 import os
 import random
 import re
+import ssl
 import sys
 import time
 import urllib.error
@@ -389,6 +390,16 @@ def main(argv=None):
             last = exc
             print(f"  attempt {attempt} failed: {exc}", file=sys.stderr, flush=True)
             if attempt >= attempts:
+                break
+            time.sleep(2)
+        except (urllib.error.URLError, ssl.SSLError, OSError, ValueError) as exc:
+            # Dead/flaky proxy, TLS reset mid-stream, truncated response... treat as a
+            # bad exit IP and move on to the next one instead of dying.
+            last = RuntimeError(f"network error on {proxy or 'direct'}: {exc!r}")
+            pool.retire(proxy)
+            print(f"  attempt {attempt} network error on {proxy or 'direct'}: {exc!r} — "
+                  f"rotating ({len(pool.live)} left)", file=sys.stderr, flush=True)
+            if attempt >= attempts or not pool.live:
                 break
             time.sleep(2)
 

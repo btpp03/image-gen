@@ -119,6 +119,22 @@ def download(url, dest, token=None, timeout=300):
     return dest
 
 
+def extract_url(payload):
+    # Recursively find the image URL — payload shape varies between
+    # Gradio versions: "url", [[{...}]], [{...}], or a bare URL string.
+    if isinstance(payload, str):
+        return payload if payload.startswith("http") else None
+    if isinstance(payload, dict):
+        u = payload.get("url")
+        return u if isinstance(u, str) and u.startswith("http") else None
+    if isinstance(payload, (list, tuple)):
+        for item in payload:
+            u = extract_url(item)
+            if u:
+                return u
+    return None
+
+
 def generate_once(args, token, prompt, proxy):
     use_proxy(proxy)
     tag = proxy or "direct"
@@ -133,12 +149,7 @@ def generate_once(args, token, prompt, proxy):
     eid = submit(prompt, height, width, args.steps, seed, token)
     payload = watch(eid, token, args.timeout)
 
-    url = None
-    try:
-        item = payload[0][0]
-        url = item.get("url") if isinstance(item, dict) else item
-    except Exception:
-        url = payload if isinstance(payload, str) else None
+    url = extract_url(payload)
     if not url:
         raise RuntimeError(f"no image url in payload: {str(payload)[:200]}")
 

@@ -70,32 +70,40 @@ def submit(prompt, height, width, steps, seed, token=None, timeout=60):
     return eid
 
 
+def parse_sse(lines):
+    # Parse an SSE stream. IMPORTANT: data buffer must reset on every
+    # "event:" line — Gradio sends heartbeats ("data: null") before
+    # complete, and concatenating them breaks json.loads.
+    event, data = None, []
+    for raw in lines:
+        line = raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else raw.strip()
+        if line.startswith("event:"):
+            event = line[6:].strip()
+            data = []
+        elif line.startswith("data:"):
+            data.append(line[5:].strip())
+        elif line == "" and event in ("complete", "error"):
+            blob = " ".join(data)
+            low = blob.lower()
+            if event == "error" and any(m in low for m in QUOTA_MARKERS):
+                raise QuotaError(blob[:200])
+            if event == "error":
+                raise RuntimeError(blob[:200])
+            try:
+                payload = json.loads(blob)
+            except json.JSONDecodeError:
+                raise RuntimeError(f"bad payload: {blob[:200]}")
+            return payload
+    raise TimeoutError("SSE stream ended without complete/error")
+
+
 def watch(event_id, token=None, timeout=600):
     headers = {"User-Agent": UA, "Accept": "text/event-stream"}
     if token:
         headers["Authorization"] = "Bearer " + token
     req = urllib.request.Request(f"{BASE}/gradio_api/call/generate_image/{event_id}", headers=headers)
-    event, data = None, []
     with OPENER.open(req, timeout=timeout) as r:
-        for raw in r:
-            line = raw.decode("utf-8", "replace").strip()
-            if line.startswith("event:"):
-                event = line[6:].strip()
-            elif line.startswith("data:"):
-                data.append(line[5:].strip())
-            elif line == "" and event in ("complete", "error"):
-                blob = " ".join(data)
-                low = blob.lower()
-                if event == "error" and any(m in low for m in QUOTA_MARKERS):
-                    raise QuotaError(blob[:200])
-                if event == "error":
-                    raise RuntimeError(blob[:200])
-                try:
-                    payload = json.loads(blob)
-                except json.JSONDecodeError:
-                    raise RuntimeError(f"bad payload: {blob[:200]}")
-                return payload
-    raise TimeoutError("SSE stream ended without complete/error")
+        return parse_sse(r)
 
 
 def download(url, dest, token=None, timeout=300):

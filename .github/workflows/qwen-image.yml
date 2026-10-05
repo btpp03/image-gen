@@ -33,6 +33,11 @@ on:
         description: "可选：参考图直链，逗号分隔（最多10张，用于改图）"
         default: ""
         type: string
+      space:
+        description: "生成脚本: z-image=mrfakename Z-Image-Turbo / qwen=qwen-image-2-1(队列停)"
+        default: z-image
+        type: choice
+        options: [z-image, qwen]
 
 permissions:
   contents: read
@@ -117,6 +122,7 @@ jobs:
           IMAGE_URLS: ${{ inputs.image_urls }}
           ROUTE: ${{ inputs.route }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SPACE: ${{ inputs.space }}
         run: |
           set -euo pipefail
           EXTRA=()
@@ -135,7 +141,9 @@ jobs:
             done
           fi
 
-          python3 scripts/qwen_image.py "$PROMPT" \
+          SCRIPT=scripts/z_image.py
+          [ "$SPACE" = "qwen" ] && SCRIPT=scripts/qwen_image.py
+          python3 "$SCRIPT" "$PROMPT" \
             --ratio "$RATIO" --resolution "$RES" --steps "$STEPS" \
             --out-dir out "${EXTRA[@]}" ${IMGS+"${IMGS[@]}"} 2>&1 | tee -a result.txt
 
